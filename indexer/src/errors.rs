@@ -1,3 +1,5 @@
+use tokio::sync::mpsc::error::SendError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("channel closed")]
@@ -18,6 +20,12 @@ pub enum Error {
     MailboxError(#[from] actix::MailboxError),
     #[error(transparent)]
     GetExecutionOutcomeError(#[from] near_client_primitives::types::GetExecutionOutcomeError),
+}
+
+impl<T> From<SendError<T>> for Error {
+    fn from(_: SendError<T>) -> Self {
+        Error::SendError
+    }
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
