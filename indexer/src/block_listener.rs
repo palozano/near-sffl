@@ -74,24 +74,7 @@ impl BlockListener {
         } = self;
 
         while let Some(streamer_message) = stream.recv().await {
-            // let dump = serde_json::to_vec(&streamer_message).unwrap();
-            // let dump_path = [
-            //     env!("CARGO_MANIFEST_DIR"),
-            //     "/test_data/empty/",
-            //     &streamer_message.block.header.hash.to_string(),
-            //     ".json",
-            // ]
-            // .concat();
-            // println!("dump_path: {}", dump_path);
-            // let mut file = std::fs::OpenOptions::new()
-            //     .read(true)
-            //     .write(true)
-            //     .create(true)
-            //     .open(dump_path)
-            //     .unwrap();
-            // file.write_all(&dump).unwrap();
-            // TODO: Check if receipt_receiver is closed?
-            let dump = serde_json::to_vec(&streamer_message).unwrap();
+            // TODO: check receipt_receiver is closed?
             let candidates_data: Vec<CandidateData> = streamer_message
                 .shards
                 .into_iter()
@@ -108,24 +91,7 @@ impl BlockListener {
                 continue;
             }
 
-            // let dump_path = [
-            //     env!("CARGO_MANIFEST_DIR"),
-            //     "/test_data/candidates/",
-            //     &streamer_message.block.header.hash.to_string(),
-            //     ".json",
-            // ]
-            //     .concat();
-            // println!("dump_path: {}", dump_path);
-            // let mut file = std::fs::OpenOptions::new()
-            //     .read(true)
-            //     .write(true)
-            //     .create(true)
-            //     .open(dump_path)
-            //     .unwrap();
-            // file.write_all(&dump).unwrap();
-
             let results = join_all(candidates_data.into_iter().map(|receipt| receipt_sender.send(receipt))).await;
-
             results.into_iter().collect::<Result<_, _>>()?;
         }
 
