@@ -4,6 +4,7 @@ use near_indexer::near_primitives::{
     types::{AccountId, TransactionOrReceiptId},
     views::{ActionView, ReceiptEnumView},
 };
+use std::io::Write;
 use tokio::sync::mpsc;
 
 use crate::errors::Result;
@@ -73,6 +74,24 @@ impl BlockListener {
         } = self;
 
         while let Some(streamer_message) = stream.recv().await {
+            // let dump = serde_json::to_vec(&streamer_message).unwrap();
+            // let dump_path = [
+            //     env!("CARGO_MANIFEST_DIR"),
+            //     "/test_data/empty/",
+            //     &streamer_message.block.header.hash.to_string(),
+            //     ".json",
+            // ]
+            // .concat();
+            // println!("dump_path: {}", dump_path);
+            // let mut file = std::fs::OpenOptions::new()
+            //     .read(true)
+            //     .write(true)
+            //     .create(true)
+            //     .open(dump_path)
+            //     .unwrap();
+            // file.write_all(&dump).unwrap();
+            // TODO: Check if receipt_receiver is closed?
+            let dump = serde_json::to_vec(&streamer_message).unwrap();
             let candidates_data: Vec<CandidateData> = streamer_message
                 .shards
                 .into_iter()
@@ -89,6 +108,22 @@ impl BlockListener {
                 continue;
             }
 
+            // let dump_path = [
+            //     env!("CARGO_MANIFEST_DIR"),
+            //     "/test_data/candidates/",
+            //     &streamer_message.block.header.hash.to_string(),
+            //     ".json",
+            // ]
+            //     .concat();
+            // println!("dump_path: {}", dump_path);
+            // let mut file = std::fs::OpenOptions::new()
+            //     .read(true)
+            //     .write(true)
+            //     .create(true)
+            //     .open(dump_path)
+            //     .unwrap();
+            // file.write_all(&dump).unwrap();
+
             let results = join_all(candidates_data.into_iter().map(|receipt| receipt_sender.send(receipt))).await;
 
             results.into_iter().collect::<Result<_, _>>()?;
@@ -100,12 +135,17 @@ impl BlockListener {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use crate::block_listener::{BlockListener, CandidateData};
     use near_crypto::{KeyType, PublicKey};
     use near_indexer::near_primitives::hash::CryptoHash;
     use near_indexer::near_primitives::types::{AccountId, TransactionOrReceiptId};
     use near_indexer::near_primitives::views::{ActionView, ReceiptEnumView, ReceiptView};
     use std::str::FromStr;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use near_indexer::StreamerMessage;
+    use tokio::sync::mpsc::error::TryRecvError;
 
     impl PartialEq for CandidateData {
         fn eq(&self, other: &Self) -> bool {
@@ -235,8 +275,8 @@ mod tests {
                     deposit: 100,
                 },
                 ActionView::DeleteAccount {
-                    beneficiary_id: da_contract_id.clone()
-                }
+                    beneficiary_id: da_contract_id.clone(),
+                },
             ],
         };
 
@@ -259,5 +299,114 @@ mod tests {
                 payloads: vec![vec![1, 2, 3], vec![4, 4, 4]],
             })
         );
+    }
+
+    struct StreamerMessages {
+        pub empty: Vec<StreamerMessage>,
+        pub candidates: Vec<StreamerMessage>
+    }
+
+    struct StreamerMessagesLoader;
+    impl StreamerMessagesLoader {
+        fn load() -> StreamerMessages {
+            let test_data_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/test_data");
+            let empty_data_path = [test_data_dir, "/empty"].concat();
+            let candidates_data_path = [test_data_dir, "/candidates"].concat();
+
+            StreamerMessages {
+                empty: Self::load_messages(&empty_data_path),
+                candidates: Self::load_messages(&candidates_data_path)
+            }
+        }
+
+        fn load_messages(dir_path: &str) -> Vec<StreamerMessage> {
+            let files = std::fs::read_dir(dir_path).map(|entry| {
+                entry.map(|dir_entry| {
+                    let dir_entry = dir_entry.unwrap();
+                     dir_entry.path()
+                }).collect::<Vec<PathBuf>>()
+            }).unwrap();
+
+            files.into_iter().map(|file| {
+                let file = std::fs::File::open(file).unwrap();
+                serde_json::from_reader(file).unwrap()
+            }).collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_empty_listener() {
+        let da_contract_id = "da.test.near".parse().unwrap();
+        let streamer_messages = StreamerMessagesLoader::load();
+
+        let (sender, receiver) = mpsc::channel(10);
+        let (receipt_sender, mut receipt_receiver) = mpsc::channel(10);
+
+        let listener = BlockListener::new(receiver, receipt_sender, da_contract_id);
+        let handle = tokio::spawn(listener.start());
+
+        for el in streamer_messages.empty {
+            sender.send(el).await.unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert_eq!(receipt_receiver.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn test_candidates_listener() {
+        let da_contract_id = "da.test.near".parse().unwrap();
+        let streamer_messages = StreamerMessagesLoader::load();
+
+        let (sender, receiver) = mpsc::channel(10);
+        let (receipt_sender, mut receipt_receiver) = mpsc::channel(10);
+
+        let listener = BlockListener::new(receiver, receipt_sender, da_contract_id);
+        let handle = tokio::spawn(listener.start());
+
+        let expected = streamer_messages.candidates.len();
+        for el in streamer_messages.candidates {
+            sender.send(el).await.unwrap();
+        }
+
+        drop(sender);
+        handle.await.unwrap().unwrap();
+
+        let mut counter = 0;
+        loop {
+            match receipt_receiver.recv().await {
+                Some(_) => counter += 1,
+                None => break
+            }
+        }
+
+        assert_eq!(expected, counter);
+    }
+
+    #[tokio::test]
+    async fn test_shutdown() {
+        let da_contract_id = "da.test.near".parse().unwrap();
+        let streamer_messages = StreamerMessagesLoader::load();
+
+        let (sender, receiver) = mpsc::channel(10);
+        let (receipt_sender, mut receipt_receiver) = mpsc::channel(10);
+
+        let listener = BlockListener::new(receiver, receipt_sender, da_contract_id);
+        let handle = tokio::spawn(listener.start());
+        for (i, el) in streamer_messages.empty.into_iter().enumerate() {
+            sender.send(el).await.unwrap();
+
+            // some random number
+            if i == 5 {
+                break;
+            }
+        }
+
+        drop(receipt_receiver);
+        let _ = sender.send(streamer_messages.candidates.into_iter().next_back().unwrap()).await;
+
+        // Assert tha handle terminated with error
+        assert!(handle.await.unwrap().is_err());
     }
 }
