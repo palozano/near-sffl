@@ -4,7 +4,6 @@ use near_indexer::near_primitives::{
     types::{AccountId, TransactionOrReceiptId},
     views::{ActionView, ReceiptEnumView},
 };
-use std::io::Write;
 use tokio::sync::mpsc;
 
 use crate::errors::Result;
@@ -309,7 +308,7 @@ mod tests {
         let (receipt_sender, mut receipt_receiver) = mpsc::channel(10);
 
         let listener = BlockListener::new(receiver, receipt_sender, da_contract_id);
-        let handle = tokio::spawn(listener.start());
+        let _ = tokio::spawn(listener.start());
 
         for el in streamer_messages.empty {
             sender.send(el).await.unwrap();
@@ -356,7 +355,7 @@ mod tests {
         let streamer_messages = StreamerMessagesLoader::load();
 
         let (sender, receiver) = mpsc::channel(10);
-        let (receipt_sender, mut receipt_receiver) = mpsc::channel(10);
+        let (receipt_sender, receipt_receiver) = mpsc::channel(10);
 
         let listener = BlockListener::new(receiver, receipt_sender, da_contract_id);
         let handle = tokio::spawn(listener.start());
