@@ -21,23 +21,14 @@ var (
 		"da-mq": 0,
 		// Add mappings
 	}
-	defaultQueues = compilerDefaultQueues()
 
 	errAlreadyClosed = errors.New("already closed: not connected to the server")
 )
 
-func compilerDefaultQueues() []string {
-	keys := make([]string, 0, len(QueueNamesToNetworkId))
-	for k := range QueueNamesToNetworkId {
-		keys = append(keys, k)
-	}
-
-	return keys
-}
-
 type ConsumerConfig struct {
 	Addr        string
 	ConsumerTag string
+	QueueNames  []string
 }
 
 type BlockData struct {
@@ -61,13 +52,12 @@ type Consumer struct {
 	queuesListener QueuesListener
 }
 
-// TODO: Pass default queues in config?
 func NewConsumer(config ConsumerConfig) Consumer {
 	// TODO: context.TODO() or background?
 	ctx, cancel := context.WithCancel(context.TODO())
 	consumer := Consumer{
 		consumerTag:       config.ConsumerTag,
-		queues:            defaultQueues,
+		queues:            config.QueueNames,
 		blockstream:       make(chan BlockData),
 		contextCancelFunc: cancel,
 	}
@@ -237,6 +227,7 @@ func (consumer *Consumer) Close(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
 	consumer.isReady = false
 	return nil
 }
