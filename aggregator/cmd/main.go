@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	sdklogging "github.com/Layr-Labs/eigensdk-go/logging"
 	"log"
 	"os"
 
