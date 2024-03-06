@@ -55,7 +55,7 @@ func TestIntegration(t *testing.T) {
 
 	time.Sleep(10 * time.Second)
 
-	newOperator := startOperator(t, ctx, genOperatorConfig(t, ctx, setup.mainnetAnvil, setup.rollupAnvils, setup.rabbitMq))
+	newOperator := startOperator(t, ctx, genOperatorConfig(t, ctx, setup.mainnetAnvil, setup.rollupAnvils, setup.rabbitMq, 2))
 
 	taskHash, err := setup.avsReader.AvsServiceBindings.TaskManager.AllCheckpointTaskHashes(&bind.CallOpts{}, 0)
 	if err != nil {
@@ -171,7 +171,7 @@ func setupTestEnv(t *testing.T, ctx context.Context) *testEnv {
 		t.Fatalf("Failed to create logger: %s", err.Error())
 	}
 
-	nodeConfig := genOperatorConfig(t, ctx, mainnetAnvil, rollupAnvils, rabbitMq)
+	nodeConfig := genOperatorConfig(t, ctx, mainnetAnvil, rollupAnvils, rabbitMq, 1)
 	operator := startOperator(t, ctx, nodeConfig)
 
 	config := buildConfig(t, sfflDeploymentRaw, rollupSfflDeploymentsRaw, configRaw)
@@ -293,7 +293,7 @@ func readRollupSfflDeploymentRaw() []config.RollupSFFLDeploymentRaw {
 	return rollupDeploymentsInfo
 }
 
-func genOperatorConfig(t *testing.T, ctx context.Context, mainnetAnvil *AnvilInstance, rollupAnvils []*AnvilInstance, rabbitMq *rabbitmq.RabbitMQContainer) types.NodeConfig {
+func genOperatorConfig(t *testing.T, ctx context.Context, mainnetAnvil *AnvilInstance, rollupAnvils []*AnvilInstance, rabbitMq *rabbitmq.RabbitMQContainer, instanceCount uint) types.NodeConfig {
 	nodeConfig := types.NodeConfig{}
 	nodeConfigFilePath := "../../config-files/operator.anvil.yaml"
 	err := sdkutils.ReadYamlConfig(nodeConfigFilePath, &nodeConfig)
@@ -306,41 +306,44 @@ func genOperatorConfig(t *testing.T, ctx context.Context, mainnetAnvil *AnvilIns
 	os.Setenv("OPERATOR_BLS_KEY_PASSWORD", "")
 	os.Setenv("OPERATOR_ECDSA_KEY_PASSWORD", "")
 
-	err = os.MkdirAll(getOperatorKeysPathPrefix(t), 0770)
+	//keysDir := getOperatorKeysPathPrefix(t)
+	//err = os.MkdirAll(keysDir, 0770)
+	//if err != nil {
+	//	t.Fatalf("Failed to create operators keys dir: %s", err.Error())
+	//}
+	//
+	//keysPath, err := os.MkdirTemp(keysDir, "")
+	//if err != nil {
+	//	t.Fatalf("Failed to create operator keys dir: %s", err.Error())
+	//}
+
+	blsKeysDir := filepath.Dir(nodeConfig.BlsPrivateKeyStorePath)
+	blsKeysPath := filepath.Join("../../", blsKeysDir, fmt.Sprintf("%d.bls.key.json", instanceCount))
+	nodeConfig.BlsPrivateKeyStorePath, err = filepath.Abs(blsKeysPath)
 	if err != nil {
-		t.Fatalf("Failed to create operators keys dir: %s", err.Error())
+		t.Fatalf("Failed to get BLS path: %s", err.Error())
 	}
 
-	keysPath, err := os.MkdirTemp(getOperatorKeysPathPrefix(t), "")
+	blsKey, err := bls.ReadPrivateKeyFromFile(nodeConfig.BlsPrivateKeyStorePath, "fDUMDLmBROwlzzPXyIcy")
 	if err != nil {
-		t.Fatalf("Failed to create operator keys dir: %s", err.Error())
+		t.Fatal("err:", err)
 	}
 
-	nodeConfig.BlsPrivateKeyStorePath, err = filepath.Abs(filepath.Join(keysPath, "test.bls.key.json"))
+	t.Log("blsKey:", blsKey)
+
+	ecdsaKeysDir := filepath.Dir(nodeConfig.EcdsaPrivateKeyStorePath)
+	ecdsaKeysPath := filepath.Join("../../", ecdsaKeysDir, fmt.Sprintf("%d.ecdsa.key.json", instanceCount))
+	nodeConfig.EcdsaPrivateKeyStorePath, err = filepath.Abs(ecdsaKeysPath)
 	if err != nil {
-		t.Fatalf("Failed to get BLS key dir: %s", err.Error())
-	}
-	keyPair, err := bls.GenRandomBlsKeys()
-	if err != nil {
-		t.Fatalf("Failed to generate operator BLS keys: %s", err.Error())
-	}
-	err = keyPair.SaveToFile(nodeConfig.BlsPrivateKeyStorePath, "")
-	if err != nil {
-		t.Fatalf("Failed to save operator BLS keys: %s", err.Error())
+		t.Fatalf("Failed to get ecdsa path: %s", err.Error())
 	}
 
-	nodeConfig.EcdsaPrivateKeyStorePath, err = filepath.Abs(filepath.Join(keysPath, "test.ecdsa.key.json"))
+	ecdsaKey, err := sdkecdsa.ReadKey(nodeConfig.EcdsaPrivateKeyStorePath, "EnJuncq01CiVk9UbuBYl")
 	if err != nil {
-		t.Fatalf("Failed to get ECDSA key dir: %s", err.Error())
+		t.Fatalf("Failed to read ecdsa key: %s", err)
 	}
-	ecdsaKey, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatalf("Failed to save generate operator ECDSA key: %s", err.Error())
-	}
-	sdkEcdsa.WriteKey(nodeConfig.EcdsaPrivateKeyStorePath, ecdsaKey, "")
-	if err != nil {
-		t.Fatalf("Failed to save operator ECDSA keys: %s", err.Error())
-	}
+
+	t.Log("ecdsaKey:", ecdsaKey)
 
 	address := crypto.PubkeyToAddress(ecdsaKey.PublicKey)
 
