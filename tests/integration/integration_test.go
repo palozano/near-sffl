@@ -338,7 +338,7 @@ func genOperatorConfig(t *testing.T, ctx context.Context, mainnetAnvil *AnvilIns
 		t.Fatalf("Failed to get ecdsa path: %s", err.Error())
 	}
 
-	ecdsaKey, err := sdkecdsa.ReadKey(nodeConfig.EcdsaPrivateKeyStorePath, "EnJuncq01CiVk9UbuBYl")
+	ecdsaKey, err := sdkEcdsa.ReadKey(nodeConfig.EcdsaPrivateKeyStorePath, "EnJuncq01CiVk9UbuBYl")
 	if err != nil {
 		t.Fatalf("Failed to read ecdsa key: %s", err)
 	}

@@ -57,7 +57,7 @@ type SFFLContractsRaw struct {
 	OperatorStateRetrieverAddr string `json:"operatorStateRetriever"`
 }
 
-// These are read from
+// These are read from RollupSFFLDeploymentFilesFlag
 type RollupSFFLDeploymentRaw struct {
 	Addresses RollupAddressesRaw `json:"addresses"`
 	ChainInfo ChainInfoRaw       `json:"chainInfo"`
@@ -162,7 +162,7 @@ func NewConfig(configRaw ConfigRaw, ctx *cli.Context) (*Config, error) {
 		AggregatorRestServerIpPortAddr: configRaw.AggregatorRestServerIpPortAddr,
 		AggregatorDatabasePath:         configRaw.AggregatorDatabasePath,
 		AggregatorAddress:              aggregatorAddr,
-		RollupsInfo:                 rollupsInfo,
+		RollupsInfo:                    rollupsInfo,
 	}
 	config.validate()
 

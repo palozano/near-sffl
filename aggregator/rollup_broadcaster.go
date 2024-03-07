@@ -2,14 +2,16 @@ package aggregator
 
 import (
 	"context"
+	"time"
+
 	"github.com/Layr-Labs/eigensdk-go/chainio/clients/eth"
 	"github.com/Layr-Labs/eigensdk-go/chainio/txmgr"
 	"github.com/Layr-Labs/eigensdk-go/logging"
 	"github.com/Layr-Labs/eigensdk-go/signerv2"
-	regrollup "github.com/NethermindEth/near-sffl/contracts/bindings/SFFLRegistryRollup"
-	"github.com/NethermindEth/near-sffl/core/config"
 	"github.com/ethereum/go-ethereum/common"
-	"time"
+
+	registryrollup "github.com/NethermindEth/near-sffl/contracts/bindings/SFFLRegistryRollup"
+	"github.com/NethermindEth/near-sffl/core/config"
 )
 
 const NUM_OF_RETRIES = 5
@@ -18,12 +20,12 @@ const TX_RETRY_INTERVAL = time.Millisecond * 200
 type RollupWriter struct {
 	txMgr              txmgr.TxManager
 	client             eth.EthClient
-	sfflRegistryRollup *regrollup.ContractSFFLRegistryRollup
+	sfflRegistryRollup *registryrollup.ContractSFFLRegistryRollup
 
 	logger logging.Logger
 }
 
-func NewRollupWriter(rollupInfo config.RollupInfo, signerConfig signerv2.Config, address common.Address, logger logging.Logger, ctx context.Context) (*RollupWriter, error) {
+func NewRollupWriter(ctx context.Context, rollupInfo config.RollupInfo, signerConfig signerv2.Config, address common.Address, logger logging.Logger) (*RollupWriter, error) {
 	client, err := eth.NewClient(rollupInfo.RpcUrl)
 	if err != nil {
 		return nil, err
@@ -40,7 +42,7 @@ func NewRollupWriter(rollupInfo config.RollupInfo, signerConfig signerv2.Config,
 	}
 	txMgr := txmgr.NewSimpleTxManager(client, logger, signerV2, address)
 
-	sfflRegistryRollup, err := regrollup.NewContractSFFLRegistryRollup(rollupInfo.SFFLRegistryRollupAddr, client)
+	sfflRegistryRollup, err := registryrollup.NewContractSFFLRegistryRollup(rollupInfo.SFFLRegistryRollupAddr, client)
 	if err != nil {
 		return nil, err
 	}
@@ -53,21 +55,21 @@ func NewRollupWriter(rollupInfo config.RollupInfo, signerConfig signerv2.Config,
 	}, nil
 }
 
-func (writer *RollupWriter) UpdateOperatorSet(ctx context.Context, message regrollup.OperatorSetUpdateMessage, signatureInfo regrollup.OperatorsSignatureInfo) error {
+func (w *RollupWriter) UpdateOperatorSet(ctx context.Context, message registryrollup.OperatorSetUpdateMessage, signatureInfo registryrollup.OperatorsSignatureInfo) error {
 	operation := func() error {
-		txOpts, err := writer.txMgr.GetNoSendTxOpts()
+		txOpts, err := w.txMgr.GetNoSendTxOpts()
 		if err != nil {
-			writer.logger.Error("Error getting tx opts", "err", err)
+			w.logger.Error("Error getting tx opts", "err", err)
 			return err
 		}
 
-		tx, err := writer.sfflRegistryRollup.UpdateOperatorSet(txOpts, message, signatureInfo)
+		tx, err := w.sfflRegistryRollup.UpdateOperatorSet(txOpts, message, signatureInfo)
 		if err != nil {
-			writer.logger.Error("Error assembling UpdateOperatorSet tx", "err", err)
+			w.logger.Error("Error assembling UpdateOperatorSet tx", "err", err)
 			return err
 		}
 
-		_, err = writer.txMgr.Send(ctx, tx)
+		_, err = w.txMgr.Send(ctx, tx)
 		if err != nil {
 			return err
 		}
@@ -80,11 +82,14 @@ func (writer *RollupWriter) UpdateOperatorSet(ctx context.Context, message regro
 		err = operation()
 		if err == nil {
 			return nil
+		} else {
+			// TODO: return on same tx err
+			w.logger.Warn("Sending UpdateOperatorSet failed", "err", err)
 		}
 
 		select {
 		case <-ctx.Done():
-			writer.logger.Info("Context canceled")
+			w.logger.Info("Context canceled")
 			return ctx.Err()
 
 		case <-time.After(TX_RETRY_INTERVAL):
@@ -96,7 +101,7 @@ func (writer *RollupWriter) UpdateOperatorSet(ctx context.Context, message regro
 }
 
 type RollupBroadcasterer interface {
-	BroadcastOperatorSetUpdate(ctx context.Context, message regrollup.OperatorSetUpdateMessage, signatureInfo regrollup.OperatorsSignatureInfo)
+	BroadcastOperatorSetUpdate(ctx context.Context, message registryrollup.OperatorSetUpdateMessage, signatureInfo registryrollup.OperatorsSignatureInfo)
 	GetErrorChan() <-chan error
 }
 
@@ -105,12 +110,12 @@ type RollupBroadcaster struct {
 	errorChan chan error
 }
 
-func NewRollupBroadcaster(rollupsInfo map[uint32]config.RollupInfo, signerConfig signerv2.Config, address common.Address, logger logging.Logger, ctx context.Context) (*RollupBroadcaster, error) {
+func NewRollupBroadcaster(ctx context.Context, rollupsInfo map[uint32]config.RollupInfo, signerConfig signerv2.Config, address common.Address, logger logging.Logger) (*RollupBroadcaster, error) {
 	writers := make([]*RollupWriter, 0, len(rollupsInfo))
 	for id, info := range rollupsInfo {
-		writer, err := NewRollupWriter(info, signerConfig, address, logger, ctx)
+		writer, err := NewRollupWriter(ctx, info, signerConfig, address, logger)
 		if err != nil {
-			logger.Errorf("Couldn't create RollupWriter for chainId: %d, error: %s", id, err.Error())
+			logger.Error("Couldn't create RollupWriter", "chainId", id, "err", err)
 			return nil, err
 		}
 
@@ -123,9 +128,9 @@ func NewRollupBroadcaster(rollupsInfo map[uint32]config.RollupInfo, signerConfig
 	}, nil
 }
 
-func (broadcaster *RollupBroadcaster) BroadcastOperatorSetUpdate(ctx context.Context, message regrollup.OperatorSetUpdateMessage, signatureInfo regrollup.OperatorsSignatureInfo) {
+func (b *RollupBroadcaster) BroadcastOperatorSetUpdate(ctx context.Context, message registryrollup.OperatorSetUpdateMessage, signatureInfo registryrollup.OperatorsSignatureInfo) {
 	go func() {
-		for _, writer := range broadcaster.writers {
+		for _, writer := range b.writers {
 			select {
 			case <-ctx.Done():
 				return
@@ -133,13 +138,13 @@ func (broadcaster *RollupBroadcaster) BroadcastOperatorSetUpdate(ctx context.Con
 			default:
 				err := writer.UpdateOperatorSet(ctx, message, signatureInfo)
 				if err != nil {
-					broadcaster.errorChan <- err
+					b.errorChan <- err
 				}
 			}
 		}
 	}()
 }
 
-func (broadcaster *RollupBroadcaster) GetErrorChan() <-chan error {
-	return broadcaster.errorChan
+func (b *RollupBroadcaster) GetErrorChan() <-chan error {
+	return b.errorChan
 }
