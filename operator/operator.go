@@ -127,6 +127,7 @@ func NewOperatorFromConfig(c types.NodeConfig) (*Operator, error) {
 		logger.Errorf("Cannot parse bls private key", "err", err)
 		return nil, err
 	}
+	logger.Info("operator blsKeyPair:", "blsKeyPairb", blsKeyPair)
 
 	ecdsaKeyPassword, ok := os.LookupEnv("OPERATOR_ECDSA_KEY_PASSWORD")
 	if !ok {

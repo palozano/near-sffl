@@ -44,6 +44,11 @@ import (
 
 const TEST_DATA_DIR = "../../test_data"
 
+var (
+	OPERATOR_BLS_KEY_PASSWORDS   = [2]string{"fDUMDLmBROwlzzPXyIcy", "2EVEUyHCrHZdfdo8lp29"}
+	OPERATOR_ECDSA_KEY_PASSWORDS = [2]string{"EnJuncq01CiVk9UbuBYl", "isru1gvtykIavuk1Fg1Q"}
+)
+
 func TestIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	setup := setupTestEnv(t, ctx)
@@ -303,19 +308,8 @@ func genOperatorConfig(t *testing.T, ctx context.Context, mainnetAnvil *AnvilIns
 
 	log.Println("starting operator for integration tests")
 
-	os.Setenv("OPERATOR_BLS_KEY_PASSWORD", "")
-	os.Setenv("OPERATOR_ECDSA_KEY_PASSWORD", "")
-
-	//keysDir := getOperatorKeysPathPrefix(t)
-	//err = os.MkdirAll(keysDir, 0770)
-	//if err != nil {
-	//	t.Fatalf("Failed to create operators keys dir: %s", err.Error())
-	//}
-	//
-	//keysPath, err := os.MkdirTemp(keysDir, "")
-	//if err != nil {
-	//	t.Fatalf("Failed to create operator keys dir: %s", err.Error())
-	//}
+	os.Setenv("OPERATOR_BLS_KEY_PASSWORD", OPERATOR_BLS_KEY_PASSWORDS[instanceCount-1])
+	os.Setenv("OPERATOR_ECDSA_KEY_PASSWORD", OPERATOR_ECDSA_KEY_PASSWORDS[instanceCount-1])
 
 	blsKeysDir := filepath.Dir(nodeConfig.BlsPrivateKeyStorePath)
 	blsKeysPath := filepath.Join("../../", blsKeysDir, fmt.Sprintf("%d.bls.key.json", instanceCount))
@@ -324,12 +318,12 @@ func genOperatorConfig(t *testing.T, ctx context.Context, mainnetAnvil *AnvilIns
 		t.Fatalf("Failed to get BLS path: %s", err.Error())
 	}
 
-	blsKey, err := bls.ReadPrivateKeyFromFile(nodeConfig.BlsPrivateKeyStorePath, "fDUMDLmBROwlzzPXyIcy")
+	blsKey, err := bls.ReadPrivateKeyFromFile(nodeConfig.BlsPrivateKeyStorePath, OPERATOR_BLS_KEY_PASSWORDS[instanceCount-1])
 	if err != nil {
 		t.Fatal("err:", err)
 	}
 
-	t.Log("blsKey:", blsKey)
+	t.Log("blsKey:", blsKey.PubKey)
 
 	ecdsaKeysDir := filepath.Dir(nodeConfig.EcdsaPrivateKeyStorePath)
 	ecdsaKeysPath := filepath.Join("../../", ecdsaKeysDir, fmt.Sprintf("%d.ecdsa.key.json", instanceCount))
@@ -338,7 +332,7 @@ func genOperatorConfig(t *testing.T, ctx context.Context, mainnetAnvil *AnvilIns
 		t.Fatalf("Failed to get ecdsa path: %s", err.Error())
 	}
 
-	ecdsaKey, err := sdkEcdsa.ReadKey(nodeConfig.EcdsaPrivateKeyStorePath, "EnJuncq01CiVk9UbuBYl")
+	ecdsaKey, err := sdkEcdsa.ReadKey(nodeConfig.EcdsaPrivateKeyStorePath, OPERATOR_ECDSA_KEY_PASSWORDS[instanceCount-1])
 	if err != nil {
 		t.Fatalf("Failed to read ecdsa key: %s", err)
 	}

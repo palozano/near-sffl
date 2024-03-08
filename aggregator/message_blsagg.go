@@ -237,6 +237,7 @@ func (mbas *MessageBlsAggregatorService) handleSignedMessageDigest(signedMessage
 	if err != nil {
 		return
 	}
+	mbas.logger.Info("handleSignedMessageDigest")
 
 	digestAggregatedOperators, ok := validationInfo.aggregatedOperatorsDict[signedMessageDigest.MessageDigest]
 	if !ok {
@@ -247,6 +248,7 @@ func (mbas *MessageBlsAggregatorService) handleSignedMessageDigest(signedMessage
 			signersOperatorIdsSet:      map[types.OperatorId]bool{signedMessageDigest.OperatorId: true},
 			signersTotalStakePerQuorum: validationInfo.operatorsAvsStateDict[signedMessageDigest.OperatorId].StakePerQuorum,
 		}
+		mbas.logger.Info("Just got fist sig", "signersApkG2", digestAggregatedOperators.signersApkG2, "", signedMessageDigest.BlsSignature)
 	} else {
 		digestAggregatedOperators.signersAggSigG1.Add(signedMessageDigest.BlsSignature)
 		digestAggregatedOperators.signersApkG2.Add(validationInfo.operatorsAvsStateDict[signedMessageDigest.OperatorId].Pubkeys.G2Pubkey)
@@ -265,6 +267,8 @@ func (mbas *MessageBlsAggregatorService) handleSignedMessageDigest(signedMessage
 	if !checkIfStakeThresholdsMet(digestAggregatedOperators.signersTotalStakePerQuorum, validationInfo.totalStakePerQuorum, validationInfo.quorumThresholdPercentagesMap) {
 		return
 	}
+
+	mbas.logger.Info("asd", "signersTotalStakePerQuorum", digestAggregatedOperators.signersTotalStakePerQuorum, "totalStakePerQuorum", validationInfo.totalStakePerQuorum, "quorumThresholdPercentagesMap", validationInfo.quorumThresholdPercentagesMap)
 
 	nonSignersOperatorIds := []types.OperatorId{}
 	for operatorId := range validationInfo.operatorsAvsStateDict {
