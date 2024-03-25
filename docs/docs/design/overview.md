@@ -36,8 +36,8 @@ diagram whenever any of the interactions seems unclear.
 ### Ethereum
 
 SFFL's is enabled to provide the fast finality guarantees by leveraging the
-architecture of EigenLayer \_Actively _Valildated Service_. EigenLayer AVS
-allows the coordination of validators in distributed network towards a common
+architecture of EigenLayer _Actively Validated Service_. EigenLayer AVS allows
+the coordination of validators in distributed network towards a common
 goal. EigenLayer allows validators to reuse Ethereum stake as the mechanism
 for incentivization.
 
@@ -54,7 +54,7 @@ _middleware_. The _middleware_ contracts are directly connected to the
 EigenLayer core contracts. The AVS contracts facilitate the interaction between
 the off-chain node with the EigenLayer protocol. Operations such as registering
 as an _Operator_ (a validator) and validating task resolutions are handled by
-the AVS contracts. _Restakers_ can delegate their restaked Eth to _Operators_,
+the AVS contracts. _Restakers_ can delegate their restaked ETH to _Operators_,
 who will then validate the AVS on their behalf.
 
 ### NEAR Data Availability
