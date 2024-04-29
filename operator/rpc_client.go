@@ -83,6 +83,7 @@ func (c *AggregatorRpcClient) dialAggregatorRpcClient() error {
 
 	client, err := rpc.DialHTTP("tcp", c.aggregatorIpPortAddr)
 	if err != nil {
+		c.logger.Error("Error dialing aggregator rpc client", "err", err)
 		return err
 	}
 
@@ -107,6 +108,8 @@ func (c *AggregatorRpcClient) handleRpcError(err error) error {
 		c.rpcClientLock.Lock()
 
 		if c.rpcClient != nil {
+			c.logger.Info("Closing RPC client due to shutdown")
+
 			err = c.rpcClient.Close()
 			if err != nil {
 				c.logger.Error("Error closing RPC client", "err", err)
@@ -122,26 +125,26 @@ func (c *AggregatorRpcClient) handleRpcError(err error) error {
 }
 
 func (c *AggregatorRpcClient) onTick() {
-	tickerC := c.resendTicker.C
 	for {
-		// TODO(edwin): handle closed chan
-		<-tickerC
+		select {
+		case <-c.resendTicker.C:
+			err := c.InitializeClientIfNotExist()
+			if err != nil {
+				c.logger.Error("Error initializing client", "err", err)
+				continue
+			}
 
-		err := c.InitializeClientIfNotExist()
-		if err != nil {
-			continue
-		}
-
-		{
 			c.unsentMessagesLock.Lock()
 			if len(c.unsentMessages) == 0 {
 				c.unsentMessagesLock.Unlock()
 				continue
 			}
 			c.unsentMessagesLock.Unlock()
-		}
 
-		c.tryResendFromDeque()
+			c.tryResendFromDeque()
+		default:
+			continue
+		}
 	}
 }
 
@@ -215,8 +218,6 @@ func (c *AggregatorRpcClient) sendOperatorMessage(sendCb func() error, message R
 		appendProtected()
 		return
 	}
-
-	c.tryResendFromDeque()
 }
 
 func (c *AggregatorRpcClient) sendRequest(sendCb func() error) error {
