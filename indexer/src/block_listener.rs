@@ -85,7 +85,7 @@ impl BlockListener {
         mut done: oneshot::Receiver<()>,
         queue_protected: types::ProtectedQueue<ExpirableCandidateData>,
         candidates_sender: mpsc::Sender<CandidateData>,
-        listener: Option<BlockEventListener>
+        listener: Option<BlockEventListener>,
     ) {
         #[cfg(not(test))]
         const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -135,7 +135,10 @@ impl BlockListener {
         true
     }
 
-    fn extract_candidates(addresses_to_rollup_ids: &HashMap<AccountId, u32>, streamer_message: StreamerMessage) -> Vec<CandidateData> {
+    fn extract_candidates(
+        addresses_to_rollup_ids: &HashMap<AccountId, u32>,
+        streamer_message: StreamerMessage,
+    ) -> Vec<CandidateData> {
         streamer_message
             .shards
             .into_iter()
@@ -188,7 +191,9 @@ impl BlockListener {
             {
                 let mut queue = queue_protected.lock().await;
                 let flushed = Self::flush(&mut queue, &candidates_sender);
-                listener.as_ref().map(|l| l.current_queued_candidates.set(queue.len() as f64));
+                listener
+                    .as_ref()
+                    .map(|l| l.current_queued_candidates.set(queue.len() as f64));
                 if !flushed {
                     info!(target: INDEXER, "Not flushed, so enqueuing candidate data");
 
@@ -224,7 +229,9 @@ impl BlockListener {
                                 inner: candidate,
                             });
                             queue.extend(iter.map(|el| ExpirableCandidateData { timestamp, inner: el }));
-                            listener.as_ref().map(|l| l.current_queued_candidates.set(queue.len() as f64));
+                            listener
+                                .as_ref()
+                                .map(|l| l.current_queued_candidates.set(queue.len() as f64));
 
                             break;
                         }

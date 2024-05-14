@@ -14,6 +14,7 @@ mod candidates_validator;
 mod configs;
 mod errors;
 mod indexer_wrapper;
+mod manager;
 mod metrics;
 mod metrics_server;
 mod rabbit_publisher;

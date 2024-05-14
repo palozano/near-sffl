@@ -1,4 +1,6 @@
+use std::time::Duration;
 use borsh::{BorshDeserialize, BorshSerialize};
+use deadpool::managed::PoolError;
 use deadpool_lapin::{Manager, Pool};
 use lapin::{
     options::{BasicPublishOptions, ExchangeDeclareOptions},
@@ -8,6 +10,7 @@ use lapin::{
 use near_indexer::near_primitives::hash::CryptoHash;
 use prometheus::Registry;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 use crate::errors::{Error, Result};
@@ -95,11 +98,88 @@ impl RabbitPublisher {
         })
     }
 
-    pub fn run(&self, receiver: mpsc::Receiver<PublishData>) {
-        actix::spawn(self.clone().publisher(receiver));
+    pub fn run(&self, receiver: mpsc::Receiver<PublishData>) -> JoinHandle<mpsc::Receiver<PublishData>> {
+        let task = RmqPublisherTask::new(
+             self.connection_pool.clone(),
+            self.listener.clone(),
+            receiver
+        );
+
+        actix::spawn(task.run())
     }
 
-    async fn exchange_declare(connection: &Connection) -> Result<()> {
+    fn handle_error(error: impl Into<Error>, publish_data: Option<PublishData>) {
+        let error = error.into();
+        let msg = if let Some(data) = publish_data {
+            // TODO: add display for cx
+            // TODO: handle error here
+            format!("Publisher Error: {}, cx: {}", error.to_string(), data.cx.block_hash)
+        } else {
+            format!("Publisher Error: {}", error.to_string())
+        };
+
+        error!(target: PUBLISHER, message = display(msg.as_str()));
+    }
+}
+
+impl Metricable for RabbitPublisher {
+    fn enable_metrics(&mut self, registry: Registry) -> Result<()> {
+        let listener = make_publisher_metrics(registry)?;
+        self.listener = Some(listener);
+
+        Ok(())
+    }
+}
+
+enum RmqPublisherState {
+    Shutdown,
+    WaitingForConnection,
+    Connected { connection: Connection },
+}
+
+struct RmqPublisherTask {
+    connection_pool: Pool,
+    receiver: mpsc::Receiver<PublishData>,
+    listener: Option<PublisherListener>,
+}
+
+impl RmqPublisherTask {
+    pub fn new(
+        connection_pool: Pool,
+        listener: Option<PublisherListener>,
+        receiver: mpsc::Receiver<PublishData>,
+    ) -> Self {
+        Self {
+            connection_pool,
+            receiver,
+            listener,
+        }
+    }
+
+    pub async fn run(mut self) -> mpsc::Receiver<PublishData> {
+        const RECONNECTION_INTERVAL: Duration = Duration::from_secs(2);
+
+        let mut next_step = RmqPublisherState::WaitingForConnection;
+        next_step = self.connect().await;
+
+        loop {
+            next_step = match next_step {
+                RmqPublisherState::WaitingForConnection => {
+                    tokio::time::sleep(RECONNECTION_INTERVAL).await;
+
+                    info!(target: PUBLISHER, "Reconnecting to RMQ");
+                    self.connect().await
+                },
+                RmqPublisherState::Connected { connection } => {
+                    info!(target: PUBLISHER, "RMQ connected");
+                    self.process_stream(connection).await
+                },
+                RmqPublisherState::Shutdown => return self.receiver,
+            }
+        }
+    }
+
+    async fn exchange_declare(connection: &Connection) -> Result<(), lapin::Error> {
         let channel = connection.create_channel().await?;
         channel
             .exchange_declare(
@@ -119,104 +199,81 @@ impl RabbitPublisher {
         Ok(())
     }
 
-    async fn publisher(self, mut receiver: mpsc::Receiver<PublishData>) {
-        const ERROR_CODE: i32 = 1;
-
-        let Self {
-            connection_pool,
-            listener,
-        } = self;
-        let mut connection = match connection_pool.get().await {
+    async fn connect(&mut self) -> RmqPublisherState {
+        let Self { connection_pool, .. } = self;
+        let connection = match connection_pool.get().await {
             Ok(connection) => connection,
-            Err(err) => {
-                Self::handle_error(err, None);
-                actix::System::current().stop_with_code(ERROR_CODE);
-                return;
-            }
+            Err(err) => return match err {
+                PoolError::Timeout(_) | PoolError::Backend(_) => RmqPublisherState::WaitingForConnection,
+                // TODO: Those a bizzare
+                PoolError::Closed | PoolError::NoRuntimeSpecified | PoolError::PostCreateHook(_) => {
+                    RmqPublisherState::Shutdown
+                }
+            },
         };
 
         match Self::exchange_declare(&connection).await {
-            Ok(_) => {}
+            Ok(_) => RmqPublisherState::Connected { connection },
             Err(err) => {
                 error!(target: PUBLISHER, "Failed to declare exchange: {}", err);
-                receiver.close();
-                actix::System::current().stop_with_code(ERROR_CODE);
+                RmqPublisherState::WaitingForConnection
             }
-        };
-
-        let logic = |connection_pool: Pool, mut connection: Connection, publish_data: PublishData| async move {
-            if !connection.status().connected() {
-                connection = connection_pool.get().await?;
-            }
-
-            let channel = connection.create_channel().await?;
-
-            let PublishOptions {
-                exchange,
-                routing_key,
-                basic_publish_options,
-                basic_properties,
-            } = publish_data.publish_options.clone();
-
-            let mut payload: Vec<u8> = Vec::new();
-            publish_data.payload.serialize(&mut payload)?;
-
-            info!(target: PUBLISHER, "Publishing transaction: {:?}", publish_data.payload.transaction_id);
-
-            channel
-                .basic_publish(
-                    &exchange,
-                    &routing_key,
-                    basic_publish_options,
-                    &payload,
-                    basic_properties,
-                )
-                .await?;
-
-            info!(target: PUBLISHER, "published tx: {}, routing_key: {}", publish_data.payload.transaction_id, routing_key);
-            Ok::<_, Error>(connection)
-        };
-
-        let code = loop {
-            if let Some(publish_data) = receiver.recv().await {
-                let start_time = std::time::Instant::now();
-                match logic(connection_pool.clone(), connection, publish_data.clone()).await {
-                    Ok(new_connection) => {
-                        let duration = start_time.elapsed();
-                        listener.as_ref().map(|l| {
-                            l.num_published_blocks.inc();
-                            l.publish_duration_histogram.observe(duration.as_millis() as f64);
-                        });
-
-                        connection = new_connection;
-                    }
-                    Err(err) => {
-                        listener.as_ref().map(|l| l.num_failed_publishes.inc());
-
-                        Self::handle_error(err, Some(publish_data));
-                        break ERROR_CODE;
-                    }
-                }
-            } else {
-                break 0;
-            }
-        };
-
-        receiver.close();
-        actix::System::current().stop_with_code(code);
+        }
     }
 
-    fn handle_error(error: impl Into<Error>, publish_data: Option<PublishData>) {
-        let error = error.into();
-        let msg = if let Some(data) = publish_data {
-            // TODO: add display for cx
-            // TODO: handle error here
-            format!("Publisher Error: {}, cx: {}", error.to_string(), data.cx.block_hash)
-        } else {
-            format!("Publisher Error: {}", error.to_string())
-        };
+    async fn publish(
+        connection: &Connection,
+        payload: &[u8],
+        publish_options: PublishOptions,
+    ) -> Result<(), lapin::Error> {
+        let PublishOptions {
+            exchange,
+            routing_key,
+            basic_publish_options,
+            basic_properties,
+        } = publish_options;
 
-        error!(target: PUBLISHER, message = display(msg.as_str()));
+        let channel = connection.create_channel().await?;
+        channel
+            .basic_publish(
+                &exchange,
+                &routing_key,
+                basic_publish_options,
+                &payload,
+                basic_properties,
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn process_stream(&mut self, connection: Connection) -> RmqPublisherState {
+        while let Some(publish_data) = self.receiver.recv().await {
+            let mut payload: Vec<u8> = Vec::new();
+            if let Err(err) = publish_data.payload.serialize(&mut payload) {
+                info!(target: PUBLISHER, "couldn't serialize publish payload {}", err.to_string());
+                continue;
+            }
+
+            let start_time = std::time::Instant::now();
+            match Self::publish(&connection, &payload, publish_data.publish_options.clone()).await {
+                Ok(_) => {
+                    let duration = start_time.elapsed();
+                    self.listener.as_ref().map(|l| {
+                        l.num_published_blocks.inc();
+                        l.publish_duration_histogram.observe(duration.as_millis() as f64);
+                    });
+                    info!(target: PUBLISHER, "published tx: {}, routing_key: {}", publish_data.payload.transaction_id, publish_data.publish_options.routing_key);
+                }
+                // TODO: handle other cases
+                Err(_err) => {
+                    self.listener.as_ref().map(|l| l.num_failed_publishes.inc());
+                    return RmqPublisherState::WaitingForConnection;
+                }
+            }
+        }
+
+        RmqPublisherState::Shutdown
     }
 }
 
@@ -230,13 +287,4 @@ pub(crate) fn create_connection_pool(addr: String) -> Result<Pool> {
     let pool: Pool = Pool::builder(manager).max_size(10).build()?;
 
     Ok(pool)
-}
-
-impl Metricable for RabbitPublisher {
-    fn enable_metrics(&mut self, registry: Registry) -> Result<()> {
-        let listener = make_publisher_metrics(registry)?;
-        self.listener = Some(listener);
-
-        Ok(())
-    }
 }

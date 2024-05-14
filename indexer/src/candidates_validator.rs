@@ -98,16 +98,17 @@ impl CandidatesValidator {
         candidate_data: &types::CandidateData,
     ) -> Result<FinalExecutionStatus> {
         info!(target: CANDIDATES_VALIDATOR, "Fetching execution outcome for candidate data");
-        Ok(view_client
+        let kek = view_client
             .send(
                 near_client::TxStatus {
                     tx_hash: candidate_data.transaction.transaction.hash,
                     signer_account_id: candidate_data.transaction.transaction.signer_id.clone(),
                     fetch_receipt: true,
                 }
-                .with_span_context(),
+                    .with_span_context(),
             )
-            .await??
+            .await;
+        Ok(kek??
             .execution_outcome
             .map(|x| x.into_outcome().status)
             .unwrap_or(FinalExecutionStatus::NotStarted))
@@ -222,3 +223,6 @@ impl Metricable for CandidatesValidator {
         Ok(())
     }
 }
+
+
+//
