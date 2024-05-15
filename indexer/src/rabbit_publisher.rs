@@ -1,4 +1,3 @@
-use std::time::Duration;
 use borsh::{BorshDeserialize, BorshSerialize};
 use deadpool::managed::PoolError;
 use deadpool_lapin::{Manager, Pool};
@@ -9,12 +8,15 @@ use lapin::{
 };
 use near_indexer::near_primitives::hash::CryptoHash;
 use prometheus::Registry;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
-use crate::errors::{Error, Result};
-use crate::metrics::{make_publisher_metrics, Metricable, PublisherListener};
+use crate::{
+    errors::Result,
+    metrics::{make_publisher_metrics, Metricable, PublisherListener},
+};
 
 const PUBLISHER: &str = "publisher";
 const EXCHANGE_NAME: &str = "rollup_exchange";
@@ -99,26 +101,9 @@ impl RabbitPublisher {
     }
 
     pub fn run(&self, receiver: mpsc::Receiver<PublishData>) -> JoinHandle<mpsc::Receiver<PublishData>> {
-        let task = RmqPublisherTask::new(
-             self.connection_pool.clone(),
-            self.listener.clone(),
-            receiver
-        );
+        let task = RmqPublisherTask::new(self.connection_pool.clone(), self.listener.clone(), receiver);
 
         actix::spawn(task.run())
-    }
-
-    fn handle_error(error: impl Into<Error>, publish_data: Option<PublishData>) {
-        let error = error.into();
-        let msg = if let Some(data) = publish_data {
-            // TODO: add display for cx
-            // TODO: handle error here
-            format!("Publisher Error: {}, cx: {}", error.to_string(), data.cx.block_hash)
-        } else {
-            format!("Publisher Error: {}", error.to_string())
-        };
-
-        error!(target: PUBLISHER, message = display(msg.as_str()));
     }
 }
 
@@ -159,9 +144,7 @@ impl RmqPublisherTask {
     pub async fn run(mut self) -> mpsc::Receiver<PublishData> {
         const RECONNECTION_INTERVAL: Duration = Duration::from_secs(2);
 
-        let mut next_step = RmqPublisherState::WaitingForConnection;
-        next_step = self.connect().await;
-
+        let mut next_step = self.connect().await;
         loop {
             next_step = match next_step {
                 RmqPublisherState::WaitingForConnection => {
@@ -169,11 +152,11 @@ impl RmqPublisherTask {
 
                     info!(target: PUBLISHER, "Reconnecting to RMQ");
                     self.connect().await
-                },
+                }
                 RmqPublisherState::Connected { connection } => {
                     info!(target: PUBLISHER, "RMQ connected");
                     self.process_stream(connection).await
-                },
+                }
                 RmqPublisherState::Shutdown => return self.receiver,
             }
         }
@@ -203,13 +186,15 @@ impl RmqPublisherTask {
         let Self { connection_pool, .. } = self;
         let connection = match connection_pool.get().await {
             Ok(connection) => connection,
-            Err(err) => return match err {
-                PoolError::Timeout(_) | PoolError::Backend(_) => RmqPublisherState::WaitingForConnection,
-                // TODO: Those a bizzare
-                PoolError::Closed | PoolError::NoRuntimeSpecified | PoolError::PostCreateHook(_) => {
-                    RmqPublisherState::Shutdown
-                }
-            },
+            Err(err) => {
+                return match err {
+                    PoolError::Timeout(_) | PoolError::Backend(_) => RmqPublisherState::WaitingForConnection,
+                    // TODO: Those a bizzare
+                    PoolError::Closed | PoolError::NoRuntimeSpecified | PoolError::PostCreateHook(_) => {
+                        RmqPublisherState::Shutdown
+                    }
+                };
+            }
         };
 
         match Self::exchange_declare(&connection).await {

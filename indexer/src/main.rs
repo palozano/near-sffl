@@ -4,9 +4,7 @@ use prometheus::Registry;
 use tracing::{error, info};
 
 use crate::{
-    candidates_validator::CandidatesValidator, configs::RunConfigArgs, errors::Error, errors::Result,
-    indexer_wrapper::IndexerWrapper, metrics::Metricable, metrics_server::MetricsServer,
-    rabbit_publisher::RabbitPublisher,
+    configs::RunConfigArgs, errors::Result, manager::Manager, metrics::Metricable, metrics_server::MetricsServer,
 };
 
 mod block_listener;
@@ -23,7 +21,6 @@ mod types;
 const INDEXER: &str = "indexer";
 
 fn run(home_dir: std::path::PathBuf, config: RunConfigArgs) -> Result<()> {
-    let addresses_to_rollup_ids = config.compile_addresses_to_ids_map()?;
     let indexer_config = near_indexer::IndexerConfig {
         home_dir,
         sync_mode: near_indexer::SyncModeEnum::LatestSynced,
@@ -31,8 +28,8 @@ fn run(home_dir: std::path::PathBuf, config: RunConfigArgs) -> Result<()> {
         validate_genesis: true,
     };
 
-    let system = actix::System::new();
     let registry = Registry::new();
+    let system = actix::System::new();
     let server_handle = if let Some(metrics_addr) = config.metrics_ip_port_address {
         let metrics_server = MetricsServer::new(metrics_addr, registry.clone());
         Some(system.runtime().spawn(metrics_server.run()))
@@ -40,37 +37,17 @@ fn run(home_dir: std::path::PathBuf, config: RunConfigArgs) -> Result<()> {
         None
     };
 
-    // TODO: refactor
     let block_res = system.block_on(async move {
-        let mut indexer = IndexerWrapper::new(indexer_config, addresses_to_rollup_ids);
+        let mut manager = Manager::new(&config, indexer_config)?;
         if let Some(_) = config.metrics_ip_port_address {
-            indexer.enable_metrics(registry.clone())?;
+            manager.enable_metrics(registry)?;
         }
 
-        let (view_client, _) = indexer.client_actors();
-        let (block_handle, candidates_stream) = indexer.run();
-        let mut candidates_validator = CandidatesValidator::new(view_client);
-        if let Some(_) = config.metrics_ip_port_address {
-            candidates_validator.enable_metrics(registry.clone())?;
-        }
-
-        let validated_stream = candidates_validator.run(candidates_stream);
-        let mut rmq_publisher = RabbitPublisher::new(&config.rmq_address)?;
-        if let Some(_) = config.metrics_ip_port_address {
-            rmq_publisher.enable_metrics(registry.clone())?;
-        }
-        rmq_publisher.run(validated_stream);
-
-        // TODO: block_handle wether cancelled or Panics. Can handle
-        Ok::<_, Error>(block_handle.await?)
+        manager.run().await
     });
-
     if let Some(handle) = server_handle {
         handle.abort();
     }
-
-    // Run until publishing finished
-    system.run()?;
 
     block_res.map_err(|err| {
         error!(target: INDEXER, "Indexer Error: {}", err);

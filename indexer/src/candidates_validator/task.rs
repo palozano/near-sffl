@@ -1,47 +1,55 @@
 use near_indexer::near_primitives::views::{ExecutionStatusView, FinalExecutionStatus};
 use near_o11y::WithSpanContextExt;
-use prometheus::Registry;
 use std::{collections::VecDeque, sync, time::Duration};
 use tokio::{
     sync::{mpsc, oneshot, Mutex},
+    task::JoinHandle,
     time,
 };
-use tracing::info;
+use tracing::{error, info};
 
 use crate::{
-    errors::Result,
-    metrics::{make_candidates_validator_metrics, CandidatesListener, Metricable},
-    rabbit_publisher::RabbitPublisherHandle,
-    rabbit_publisher::{get_routing_key, PublishData, PublishOptions, PublishPayload, PublisherContext},
+    candidates_validator::CANDIDATES_VALIDATOR,
+    errors::{Error, Result},
+    metrics::CandidatesListener,
+    rabbit_publisher::{
+        get_routing_key, PublishData, PublishOptions, PublishPayload, PublisherContext, RabbitPublisherHandle,
+    },
     types,
 };
 
-const CANDIDATES_VALIDATOR: &str = "candidates_validator";
-
 #[derive(Clone)]
-pub(crate) struct CandidatesValidator {
+pub struct Task {
     view_client: actix::Addr<near_client::ViewClientActor>,
     listener: Option<CandidatesListener>,
+    queue_protected: types::ProtectedQueue<types::CandidateData>,
+    rmq_handle: RabbitPublisherHandle,
 }
 
-impl CandidatesValidator {
-    pub(crate) fn new(view_client: actix::Addr<near_client::ViewClientActor>) -> Self {
+impl Task {
+    pub fn new(
+        view_client: actix::Addr<near_client::ViewClientActor>,
+        listener: Option<CandidatesListener>,
+        rmq_handle: RabbitPublisherHandle,
+    ) -> Self {
         Self {
             view_client,
-            listener: None,
+            listener,
+            queue_protected: sync::Arc::new(Mutex::new(VecDeque::new())),
+            rmq_handle,
         }
     }
 
-    async fn ticker(
-        mut done: oneshot::Receiver<()>,
-        queue_protected: types::ProtectedQueue<types::CandidateData>,
-        mut rmq_handle: RabbitPublisherHandle,
-        view_client: actix::Addr<near_client::ViewClientActor>,
-        listener: Option<CandidatesListener>,
-    ) {
+    async fn ticker(self, mut done: oneshot::Receiver<()>) {
+        let Self {
+            view_client,
+            listener,
+            queue_protected,
+            mut rmq_handle,
+        } = self;
+
         info!(target: CANDIDATES_VALIDATOR, "Starting ticker");
         let mut interval = time::interval(Duration::from_secs(2));
-
         loop {
             tokio::select! {
                 _ = interval.tick() => {
@@ -105,13 +113,26 @@ impl CandidatesValidator {
                     signer_account_id: candidate_data.transaction.transaction.signer_id.clone(),
                     fetch_receipt: true,
                 }
-                    .with_span_context(),
+                .with_span_context(),
             )
             .await;
         Ok(kek??
             .execution_outcome
             .map(|x| x.into_outcome().status)
             .unwrap_or(FinalExecutionStatus::NotStarted))
+    }
+
+    fn handle_error(error: impl Into<Error>, publish_data: Option<PublishData>) {
+        let error = error.into();
+        let msg = if let Some(data) = publish_data {
+            // TODO: add display for cx
+            // TODO: handle error here
+            format!("Publisher Error: {}, cx: {}", error.to_string(), data.cx.block_hash)
+        } else {
+            format!("Publisher Error: {}", error.to_string())
+        };
+
+        error!(target: CANDIDATES_VALIDATOR, message = display(msg.as_str()));
     }
 
     async fn send(candidate_data: &types::CandidateData, rmq_handle: &mut RabbitPublisherHandle) -> Result<()> {
@@ -140,19 +161,14 @@ impl CandidatesValidator {
     async fn process_candidates(
         self,
         mut receiver: mpsc::Receiver<types::CandidateData>,
-        mut rmq_handle: RabbitPublisherHandle,
-    ) -> Result<()> {
-        let Self { view_client, listener } = self;
-
-        let queue_protected = sync::Arc::new(Mutex::new(VecDeque::new()));
-        let (done_sender, done_receiver) = oneshot::channel();
-        actix::spawn(Self::ticker(
-            done_receiver,
-            queue_protected.clone(),
-            rmq_handle.clone(),
-            view_client.clone(),
-            listener.clone(),
-        ));
+        done_sender: oneshot::Sender<()>,
+    ) -> Result<mpsc::Receiver<types::CandidateData>> {
+        let Self {
+            view_client,
+            listener,
+            queue_protected,
+            mut rmq_handle,
+        } = self;
 
         while let Some(candidate_data) = receiver.recv().await {
             info!(target: CANDIDATES_VALIDATOR, "Received candidate data");
@@ -200,29 +216,15 @@ impl CandidatesValidator {
         }
 
         let _ = done_sender.send(());
-        Ok(())
+        Ok(receiver)
     }
 
-    // TODO: JoinHandle or errC
-    pub(crate) fn run(&self, candidates_receiver: mpsc::Receiver<types::CandidateData>) -> mpsc::Receiver<PublishData> {
-        let (sender, receiver) = mpsc::channel(1000);
-        actix::spawn(
-            self.clone()
-                .process_candidates(candidates_receiver, RabbitPublisherHandle { sender }),
-        );
-
-        receiver
+    pub fn run(
+        self,
+        candidates_receiver: mpsc::Receiver<types::CandidateData>,
+    ) -> JoinHandle<Result<mpsc::Receiver<types::CandidateData>>> {
+        let (done_sender, done_receiver) = oneshot::channel();
+        actix::spawn(self.clone().ticker(done_receiver));
+        actix::spawn(self.process_candidates(candidates_receiver, done_sender))
     }
 }
-
-impl Metricable for CandidatesValidator {
-    fn enable_metrics(&mut self, registry: Registry) -> Result<()> {
-        let listener = make_candidates_validator_metrics(registry)?;
-        self.listener = Some(listener);
-
-        Ok(())
-    }
-}
-
-
-//

@@ -1,18 +1,18 @@
 use prometheus::Registry;
 
 use crate::{
-    candidates_validator::CandidatesValidator, configs::RunConfigArgs, errors::Result, indexer_wrapper::IndexerWrapper,
-    metrics::Metricable, rabbit_publisher::RabbitPublisher,
+    candidates_validator::spawner::CandidatesValidator, configs::RunConfigArgs, errors::Result,
+    indexer_wrapper::IndexerWrapper, metrics::Metricable, rabbit_publisher::RabbitPublisher,
 };
 
-struct Manager {
+pub(crate) struct Manager {
     indexer: IndexerWrapper,
     candidates_validator: CandidatesValidator,
     rmq_publisher: RabbitPublisher,
 }
 
 impl Manager {
-    pub fn new(config: RunConfigArgs, indexer_config: near_indexer::IndexerConfig) -> Result<Self> {
+    pub fn new(config: &RunConfigArgs, indexer_config: near_indexer::IndexerConfig) -> Result<Self> {
         let addresses_to_rollup_ids = config.compile_addresses_to_ids_map()?;
         let indexer = IndexerWrapper::new(indexer_config, addresses_to_rollup_ids);
 
@@ -27,7 +27,7 @@ impl Manager {
         })
     }
 
-    pub fn run(self) {
+    pub async fn run(self) -> Result<()> {
         let Self {
             indexer,
             candidates_validator,
@@ -35,8 +35,17 @@ impl Manager {
         } = self;
 
         let (block_handle, candidates_stream) = indexer.run();
-        let validated_stream = candidates_validator.run(candidates_stream);
-        rmq_publisher.run(validated_stream);
+        let (validation_handle, validated_stream) = candidates_validator.run(candidates_stream);
+        let rmq_handle = rmq_publisher.run(validated_stream);
+
+        // TODO
+        tokio::select! {
+            _ = block_handle => {},
+            _ = validation_handle => {},
+            _ = rmq_handle => {}
+        };
+
+        Ok(())
     }
 }
 
