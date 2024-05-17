@@ -2,6 +2,7 @@ package aggregator
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"sync"
 	"time"
@@ -84,10 +85,11 @@ type Aggregator struct {
 	wsClient             safeclient.SafeClient
 
 	// TODO(edwin): once rpc & rest decouple from aggregator fome it with them
-	registry     *prometheus.Registry
-	metrics      metrics.Metrics
-	rpcListener  RpcEventListener
-	restListener RestEventListener
+	registry           *prometheus.Registry
+	metrics            metrics.Metrics
+	rpcListener        RpcEventListener
+	restListener       RestEventListener
+	aggregatorListener AggregatorEventListener
 
 	taskBlsAggregationService              blsagg.BlsAggregationService
 	stateRootUpdateBlsAggregationService   MessageBlsAggregationService
@@ -225,6 +227,7 @@ func NewAggregator(ctx context.Context, config *config.Config, logger logging.Lo
 		operatorSetUpdates:                     make(map[coretypes.MessageDigest]messages.OperatorSetUpdateMessage),
 		restListener:                           &SelectiveRestListener{},
 		rpcListener:                            &SelectiveRpcListener{},
+		aggregatorListener:                     &SelectiveAggregatorListener{},
 	}
 
 	if config.EnableMetrics {
@@ -234,6 +237,8 @@ func NewAggregator(ctx context.Context, config *config.Config, logger logging.Lo
 		agg.metrics = clients.Metrics
 		agg.registry = registry
 	}
+
+	agg.aggregatorListener.IncAggregatorInitializations()
 
 	return agg, nil
 }
@@ -250,6 +255,12 @@ func (agg *Aggregator) EnableMetrics(registry *prometheus.Registry) error {
 		return err
 	}
 	agg.rpcListener = rpcListener
+
+	aggregatorListener, err := MakeAggregatorMetrics(registry)
+	if err != nil {
+		return err
+	}
+	agg.aggregatorListener = aggregatorListener
 
 	if err = agg.msgDb.EnableMetrics(registry); err != nil {
 		return err
@@ -312,11 +323,17 @@ func (agg *Aggregator) Close() error {
 }
 
 func (agg *Aggregator) sendAggregatedResponseToContract(blsAggServiceResp blsagg.BlsAggregationServiceResponse) {
-	// TODO: check if blsAggServiceResp contains an err
 	if blsAggServiceResp.Err != nil {
+		agg.aggregatorListener.IncErroredSubmissions()
+		if errors.Is(blsAggServiceResp.Err, blsagg.TaskExpiredError) {
+			agg.aggregatorListener.IncExpiredTasks()
+		}
+
 		agg.logger.Error("BlsAggregationServiceResponse contains an error", "err", blsAggServiceResp.Err)
 		return
 	}
+
+	agg.aggregatorListener.ObserveLastCheckpointTaskReferenceReceived(blsAggServiceResp.TaskIndex)
 
 	agg.logger.Info("Threshold reached. Sending aggregated response onchain.",
 		"taskIndex", blsAggServiceResp.TaskIndex,
@@ -333,6 +350,8 @@ func (agg *Aggregator) sendAggregatedResponseToContract(blsAggServiceResp blsagg
 		agg.logger.Error("Aggregator failed to format aggregation", "err", err)
 		return
 	}
+
+	agg.aggregatorListener.ObserveLastCheckpointTaskReferenceAggregated(blsAggServiceResp.TaskIndex)
 
 	currentBlock, err := agg.httpClient.BlockNumber(context.Background())
 	if err != nil {
@@ -388,6 +407,8 @@ func (agg *Aggregator) sendNewCheckpointTask() {
 		return
 	}
 
+	agg.aggregatorListener.ObserveLastCheckpointReferenceSent(taskIndex)
+
 	agg.tasksLock.Lock()
 	agg.tasks[taskIndex] = newTask
 	agg.tasksLock.Unlock()
@@ -419,7 +440,14 @@ func (agg *Aggregator) handleStateRootUpdateReachedQuorum(blsAggServiceResp type
 		}()
 	}
 
+	agg.aggregatorListener.ObserveLastStateRootUpdateReceived(msg.RollupId, msg.BlockHeight)
+
 	if blsAggServiceResp.Err != nil {
+		agg.aggregatorListener.IncErroredSubmissions()
+		if errors.Is(blsAggServiceResp.Err, MessageExpiredError) {
+			agg.aggregatorListener.IncExpiredMessages()
+		}
+
 		agg.logger.Error("Aggregator BLS service returned error", "err", blsAggServiceResp.Err)
 		return
 	}
@@ -428,6 +456,8 @@ func (agg *Aggregator) handleStateRootUpdateReachedQuorum(blsAggServiceResp type
 		agg.logger.Error("Aggregator could not find matching message")
 		return
 	}
+
+	agg.aggregatorListener.ObserveLastStateRootUpdateAggregated(msg.RollupId, msg.BlockHeight)
 
 	agg.logger.Info("Storing state root update", "digest", blsAggServiceResp.MessageDigest, "status", blsAggServiceResp.Status)
 
@@ -461,7 +491,14 @@ func (agg *Aggregator) handleOperatorSetUpdateReachedQuorum(ctx context.Context,
 		}()
 	}
 
+	agg.aggregatorListener.ObserveLastOperatorSetUpdateReceived(msg.Id)
+
 	if blsAggServiceResp.Err != nil {
+		agg.aggregatorListener.IncErroredSubmissions()
+		if errors.Is(blsAggServiceResp.Err, MessageExpiredError) {
+			agg.aggregatorListener.IncExpiredMessages()
+		}
+
 		agg.logger.Error("Aggregator BLS service returned error", "err", blsAggServiceResp.Err)
 		return
 	}
@@ -470,6 +507,8 @@ func (agg *Aggregator) handleOperatorSetUpdateReachedQuorum(ctx context.Context,
 		agg.logger.Error("Aggregator could not find matching message")
 		return
 	}
+
+	agg.aggregatorListener.ObserveLastOperatorSetUpdateAggregated(msg.Id)
 
 	agg.logger.Info("Storing operator set update", "digest", blsAggServiceResp.MessageDigest, "status", blsAggServiceResp.Status)
 
